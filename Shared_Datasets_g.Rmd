@@ -1,0 +1,1706 @@
+---
+title: "Untitled"
+author: "Griffin Thompson"
+date: "2023-11-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+library(R.matlab)
+datanames0 <- c("/Users/griffinthompson/Downloads/data_and_scripts/spikes_spontaneous/spiketimesmonkey1spont.mat")
+Baseline <- readMat(datanames0)
+datanames1 <- c("/Users/griffinthompson/Downloads/converted2_data.mat")
+Natural <- readMat(datanames1)
+datanames2 <- c("/Users/griffinthompson/Downloads/converted3_data.mat")
+Noise <- readMat(datanames2)
+datanames3 <- c("/Users/griffinthompson/Downloads/converted_data.mat")
+Gratings <- readMat(datanames3)
+```
+
+
+```{r}
+Events <- Baseline$data
+spike_times_list <- Events[[1]]
+# Convert each element of each sublist to a character, split it into individual numbers, and convert to numeric
+spike_times <- lapply(spike_times_list, function(sublist) {
+  as.numeric(unlist(strsplit(as.character(sublist[[1]]), " ")))
+})
+
+# Determine the maximum length of the spike times
+max_length <- max(sapply(spike_times, length))
+
+# Create an empty data frame with the correct dimensions
+spikes_df <- data.frame(matrix(ncol = length(spike_times), nrow = max_length))
+
+# Assign names to the dataframe columns
+colnames(spikes_df) <- paste0('Neuron', seq_along(spike_times))
+
+# Fill in the data frame with spike times
+for (i in seq_along(spike_times)) {
+  # Pad the end of shorter vectors with NAs
+  spikes_df[, i] <- c(spike_times[[i]], rep(NA, max_length - length(spike_times[[i]])))
+}
+
+# Now the dataframe is correctly formatted with spike times in columns
+SNR <- Events[[4]]
+SNR_Values <- lapply(SNR, function(sublist) {
+  as.numeric(unlist(strsplit(as.character(sublist[[1]]), " ")))
+})
+
+# Determine the maximum length of the spike times
+max_length <- max(sapply(SNR_Values, length))
+
+# Create an empty data frame with the correct dimensions
+SNR_df <- data.frame(matrix(ncol = length(SNR_Values), nrow = max_length))
+
+colnames(SNR_df) <- paste0('Neuron', seq_along(SNR_Values))
+
+# Fill in the data frame with spike times
+for (i in seq_along(SNR_Values)) {
+  # Pad the end of shorter vectors with NAs
+  SNR_df[, i] <- c(SNR_Values[[i]], rep(NA, max_length - length(SNR_Values[[i]])))
+}
+
+
+# Filter the dataframe to keep only columns where the second row is greater than 2.75
+filtered_SNR_df <- SNR_df[, SNR_df[1, ] > 2.75]
+
+# Print the filtered dataframe
+print(filtered_SNR_df)
+
+print(colnames(filtered_SNR_df))
+
+```
+
+
+```{r}
+# List of column names to keep
+columns_to_keep <- c("Neuron3", "Neuron11", "Neuron21", "Neuron22", "Neuron27", "Neuron29", "Neuron30", "Neuron31", "Neuron32",
+                     "Neuron37", "Neuron38", "Neuron40", "Neuron44", "Neuron51", "Neuron52", "Neuron60", "Neuron64", "Neuron67",
+                     "Neuron68", "Neuron70", "Neuron78", "Neuron80", "Neuron83", "Neuron85", "Neuron87")
+
+# Subset spikes_df to only keep the columns listed in columns_to_keep
+spikes_df <- spikes_df[, columns_to_keep]
+
+# Print the filtered dataframe
+print(spikes_df)
+```
+
+```{r}
+set.seed(123) # Set the seed for reproducibility
+
+# Define the duration of the interval
+interval_duration <- 30
+
+# Initialize a list to keep track of the lengths of the spikes within the intervals
+interval_lengths <- numeric(nrow(spikes_df))
+
+# Select the spike times within a random 30-second interval for each neuron
+interval_spikes <- lapply(spikes_df, function(spikes, total_duration) {
+  # Find the range of spike times for this neuron to set the bounds for the random interval selection
+  time_min <- min(spikes, na.rm = TRUE)
+  time_max <- max(spikes, na.rm = TRUE)
+  
+  # Generate a random start time for a 30-second interval within the bounds of this neuron's data
+  interval_start <- runif(1, min = time_min, max = time_max - interval_duration)
+  interval_end <- interval_start + interval_duration
+  
+  # Get spikes in the random interval
+  spikes_in_interval <- spikes[spikes >= interval_start & spikes < interval_end]
+  
+  # Store the length of this interval's spikes for later padding
+  interval_lengths <<- c(interval_lengths, length(spikes_in_interval))
+  
+  return(spikes_in_interval)
+}, total_duration = max(sapply(spikes_df, max, na.rm = TRUE)) - min(sapply(spikes_df, min, na.rm = TRUE)))
+
+# Find the max length of the interval spikes
+max_interval_length <- max(interval_lengths)
+
+# Pad the intervals with NAs to make all vectors the same length
+interval_spikes_padded <- lapply(interval_spikes, function(spikes) {
+  length(spikes) <- max_interval_length
+  return(spikes)
+})
+
+# Combine into a data frame
+interval_df <- do.call(data.frame, interval_spikes_padded)
+
+# Name the columns appropriately
+names(interval_df) <- paste0(names(spikes_df), "_Interval")
+
+# Print the first few rows of the interval data frame to verify
+head(interval_df)
+
+```
+
+
+```{r}
+# Define the total recording duration in milliseconds
+total_duration_ms <- 180 * 1000  # 180 seconds converted to milliseconds
+
+# Create 1ms bins
+bins <- seq(0, total_duration_ms, by = 1) 
+
+# Function to bin spikes and calculate firing rates
+bin_and_calculate_rates <- function(neuron_spike_times) {
+  # Bin the spike times
+  spike_counts <- hist(neuron_spike_times, breaks = bins, plot = FALSE)$counts
+  
+  # Convert spike counts to firing rates (spikes per second)
+  firing_rates_per_sec <- spike_counts 
+  
+  return(firing_rates_per_sec)
+}
+
+# Apply the function to each neuron's spike data
+spontaneous_firing_rates <- lapply(spikes_df, function(neuron_data) {
+  neuron_data <- neuron_data[!is.na(neuron_data)] # Remove NAs
+  bin_and_calculate_rates(neuron_data)
+})
+
+```
+
+## GRATINGS
+
+```{r}
+spike_G_times_list <- Gratings$data[[1]]
+
+# Convert each element of each sublist to a character, split it into individual numbers, and convert to numeric
+spike_G_times <- lapply(spike_G_times_list, function(sublist) {
+  as.numeric(unlist(strsplit(as.character(sublist[[1]]), " ")))
+})
+
+# Determine the maximum length of the spike times
+max_G_length <- max(sapply(spike_G_times, length))
+
+# Create an empty data frame with the correct dimensions
+spikes_gratings_df <- data.frame(matrix(ncol = length(spike_G_times), nrow = max_G_length))
+
+# Assign names to the dataframe columns
+colnames(spikes_gratings_df) <- paste0('Neuron', seq_along(spike_G_times))
+
+# Fill in the data frame with spike times
+for (i in seq_along(spike_G_times)) {
+  # Pad the end of shorter vectors with NAs
+  spikes_gratings_df[, i] <- c(spike_G_times[[i]], rep(NA, max_G_length - length(spike_G_times[[i]])))
+}
+```
+
+
+
+```{r}
+num_neurons <- 74
+num_trials <- 120
+gratings_trial_data_list <- list()
+
+for (i in 1:num_trials) {
+    start_col <- (i - 1) * num_neurons + 1
+    end_col <- i * num_neurons
+    # Extract the data for neurons in the current trial
+    gratings_trial_data_list[[i]] <- spikes_gratings_df[, start_col:end_col]
+    # Rename the columns to Neuron1 to Neuron74
+    colnames(gratings_trial_data_list[[i]]) <- paste0("Neuron", 1:num_neurons)
+}
+
+
+```
+
+```{r}
+# Define the duration of each recording in seconds
+recording_duration <- 30  # 30 seconds
+
+# Function to calculate firing rate
+calculate_firing_rate <- function(spike_times) {
+  num_spikes <- length(spike_times)
+  firing_rate <- num_spikes / recording_duration
+  return(firing_rate)
+}
+
+# Calculate firing rates for each neuron in each trial
+firing_rates_trials <- lapply(gratings_trial_data_list, function(trial_data) {
+  apply(trial_data, 2, function(neuron_data) {
+    calculate_firing_rate(neuron_data[!is.na(neuron_data)])
+  })
+})
+
+```
+
+```{r}
+firing_rate_threshold <- 1.0  # 1.0 spikes/sec
+
+# Function to determine if a neuron meets the firing rate threshold on average
+meets_threshold <- function(neuron_firing_rates) {
+  mean_firing_rate <- mean(neuron_firing_rates, na.rm = TRUE)
+  return(mean_firing_rate >= firing_rate_threshold)
+}
+
+# Filter neurons based on the average firing rate threshold
+good_neurons <- sapply(firing_rates_trials, function(trial_firing_rates) {
+  sapply(trial_firing_rates, meets_threshold)
+})
+
+# Keep neurons that meet the threshold in all trials
+good_neurons_all_trials <- apply(good_neurons, 1, all)
+
+# Filter the original gratings_trial_data_list to only include 'good' neurons
+good_neurons_gratings_data <- lapply(gratings_trial_data_list, function(trial_data) {
+  trial_data[, good_neurons_all_trials]
+})
+
+```
+
+```{r}
+# Define the bin width in milliseconds
+bin_width <- 1
+
+# Function to bin spike times into 1ms bins
+bin_spike_times <- function(spike_times, total_duration, bin_width) {
+  # Calculate the number of bins needed
+  num_bins <- ceiling(total_duration * 1000 / bin_width)
+  
+  # Create a zero vector to store the binned spike counts
+  binned_spikes <- numeric(num_bins)
+  
+  # Loop through each spike time
+  for (spike in spike_times) {
+    if (!is.na(spike)) {
+      # Find the appropriate bin for the spike time
+      bin <- ceiling(spike / bin_width)
+      binned_spikes[bin] <- binned_spikes[bin] + 1
+    }
+  }
+  
+  return(binned_spikes)
+}
+
+# Apply the binning function to each neuron's data for each trial
+binned_gratings_data <- lapply(good_neurons_gratings_data, function(trial_data) {
+  lapply(trial_data, function(neuron_data) {
+    # Extract the spike times for the neuron across all trials
+    spike_times <- unlist(neuron_data)
+    
+    # Find the total duration of the recording by taking the max spike time
+    total_duration <- max(spike_times, na.rm = TRUE)
+    
+    # Bin the spike times
+    bin_spike_times(spike_times, total_duration, bin_width)
+  })
+})
+
+```
+
+## Raster Plots
+
+```{r}
+# Function to create a raster plot for a given neuron
+create_raster_plot <- function(neuron_number, trials_data_list, num_trials) {
+  # Initialize a list to hold all spike times for the neuron
+  neuron_spike_times_all_trials <- vector("list", num_trials)
+  
+  # Loop through each trial and collect the spike times for the neuron
+  for(i in 1:num_trials) {
+    neuron_spike_times_all_trials[[i]] <- trials_data_list[[i]][[paste0("Neuron", neuron_number)]]
+  }
+  
+  # Plot with one row per trial
+  plot(NULL, xlim = c(0, 30), ylim = c(0, num_trials),
+       xlab = "Time (seconds)", ylab = "Trial", main = paste("Raster Plot for Neuron", neuron_number))
+  
+  # Add horizontal lines for better visualization
+  abline(h = 1:num_trials, col = "lightgrey", lty = "dotted")
+  
+  # Plot the spikes for each trial
+  for(i in 1:num_trials) {
+    spike_times <- neuron_spike_times_all_trials[[i]]
+    if (length(spike_times) > 0) {
+      # Add points for each spike time, offset slightly by the trial number
+      points(spike_times, rep(i, length(spike_times)), pch = 20)
+    }
+  }
+}
+
+
+if (!require(plotrix)) install.packages("plotrix")
+library(plotrix)
+
+# Specify the neuron numbers you want to plot
+neurons_to_plot <- c(3, 46, 70, 28, 24)
+
+# Number of trials
+num_trials <- length(gratings_trial_data_list)
+
+# Create raster plots for each specified neuron
+
+for (neuron_number in neurons_to_plot) {
+  create_raster_plot(neuron_number, gratings_trial_data_list, num_trials)
+}
+
+```
+
+
+
+## Movie Spikes Natural Analyses 
+
+```{r}
+spike_N_times_list <- Natural$data[[1]]
+
+# Convert each element of each sublist to a character, split it into individual numbers, and convert to numeric
+spike_N_times <- lapply(spike_N_times_list, function(sublist) {
+  as.numeric(unlist(strsplit(as.character(sublist[[1]]), " ")))
+})
+
+# Determine the maximum length of the spike times
+max_N_length <- max(sapply(spike_N_times, length))
+
+# Create an empty data frame with the correct dimensions
+spikes_natural_df <- data.frame(matrix(ncol = length(spike_N_times), nrow = max_N_length))
+
+# Assign names to the dataframe columns
+colnames(spikes_natural_df) <- paste0('Neuron', seq_along(spike_N_times))
+
+# Fill in the data frame with spike times
+for (i in seq_along(spike_N_times)) {
+  # Pad the end of shorter vectors with NAs
+  spikes_natural_df[, i] <- c(spike_N_times[[i]], rep(NA, max_N_length - length(spike_N_times[[i]])))
+}
+```
+
+
+
+```{r}
+num_neurons <- 74
+num_trials <- 120
+natural_trial_data_list <- list()
+
+for (i in 1:num_trials) {
+    start_col <- (i - 1) * num_neurons + 1
+    end_col <- i * num_neurons
+    # Extract the data for neurons in the current trial
+    natural_trial_data_list[[i]] <- spikes_natural_df[, start_col:end_col]
+    # Rename the columns to Neuron1 to Neuron74
+    colnames(natural_trial_data_list[[i]]) <- paste0("Neuron", 1:num_neurons)
+}
+
+
+```
+
+```{r}
+# Define the duration of each recording in seconds
+recording_duration <- 30  # 30 seconds
+
+# Function to calculate firing rate
+calculate_firing_rate <- function(spike_times) {
+  num_spikes <- length(spike_times)
+  firing_rate <- num_spikes / recording_duration
+  return(firing_rate)
+}
+
+# Calculate firing rates for each neuron in each trial
+firing_rates_trials_natural <- lapply(natural_trial_data_list, function(trial_data) {
+  apply(trial_data, 2, function(neuron_data) {
+    calculate_firing_rate(neuron_data[!is.na(neuron_data)])
+  })
+})
+
+```
+
+```{r}
+firing_rate_threshold <- 1.0  # 1.0 spikes/sec
+
+# Function to determine if a neuron meets the firing rate threshold on average
+meets_threshold <- function(neuron_firing_rates) {
+  mean_firing_rate <- mean(neuron_firing_rates, na.rm = TRUE)
+  return(mean_firing_rate >= firing_rate_threshold)
+}
+
+# Filter neurons based on the average firing rate threshold
+good_neurons <- sapply(firing_rates_trials_natural, function(trial_firing_rates) {
+  sapply(trial_firing_rates, meets_threshold)
+})
+
+good_neurons_all_trials_natural <- apply(good_neurons, 1, all)
+
+# Filter the original gratings_trial_data_list to only include 'good' neurons
+good_neurons_natural_data <- lapply(natural_trial_data_list, function(trial_data) {
+  trial_data[, good_neurons_all_trials_natural]
+})
+
+```
+
+## Raster Plots
+
+```{r}
+# Function to create a raster plot for a given neuron
+create_raster_plot <- function(neuron_number, trials_data_list, num_trials) {
+  # Initialize a list to hold all spike times for the neuron
+  neuron_spike_times_all_trials <- vector("list", num_trials)
+  
+  # Loop through each trial and collect the spike times for the neuron
+  for(i in 1:num_trials) {
+    neuron_spike_times_all_trials[[i]] <- trials_data_list[[i]][[paste0("Neuron", neuron_number)]]
+  }
+  
+  # Plot with one row per trial
+  plot(NULL, xlim = c(0, 30), ylim = c(0, num_trials),
+       xlab = "Time (seconds)", ylab = "Trial", main = paste("Raster Plot for Neuron", neuron_number))
+  
+  # Add horizontal lines for better visualization
+  abline(h = 1:num_trials, col = "lightgrey", lty = "dotted")
+  
+  # Plot the spikes for each trial
+  for(i in 1:num_trials) {
+    spike_times <- neuron_spike_times_all_trials[[i]]
+    if (length(spike_times) > 0) {
+      # Add points for each spike time, offset slightly by the trial number
+      points(spike_times, rep(i, length(spike_times)), pch = 20)
+    }
+  }
+}
+
+if (!require(plotrix)) install.packages("plotrix")
+library(plotrix)
+
+# Specify the neuron numbers you want to plot
+neurons_to_plot <- c(3, 46, 70, 28, 24)
+
+# Number of trials
+num_trials <- length(natural_trial_data_list)
+
+# Create raster plots for each specified neuron
+
+for (neuron_number in neurons_to_plot) {
+  create_raster_plot(neuron_number, natural_trial_data_list, num_trials)
+}
+
+```
+
+## Movie Spikes Noise Analyses 
+
+```{r}
+spike_Noise_times_list <- Noise$data[[1]]
+
+# Convert each element of each sublist to a character, split it into individual numbers, and convert to numeric
+spike_Noise_times <- lapply(spike_Noise_times_list, function(sublist) {
+  as.numeric(unlist(strsplit(as.character(sublist[[1]]), " ")))
+})
+
+# Determine the maximum length of the spike times
+max_Noise_length <- max(sapply(spike_Noise_times, length))
+
+# Create an empty data frame with the correct dimensions
+spikes_noise_df <- data.frame(matrix(ncol = length(spike_Noise_times), nrow = max_Noise_length))
+
+# Assign names to the dataframe columns
+colnames(spikes_noise_df) <- paste0('Neuron', seq_along(spike_Noise_times))
+
+# Fill in the data frame with spike times
+for (i in seq_along(spike_Noise_times)) {
+  # Pad the end of shorter vectors with NAs
+  spikes_noise_df[, i] <- c(spike_Noise_times[[i]], rep(NA, max_Noise_length - length(spike_Noise_times[[i]])))
+}
+```
+
+
+```{r}
+num_neurons <- 74
+num_trials <- 120
+noise_trial_data_list <- list()
+
+for (i in 1:num_trials) {
+    start_col <- (i - 1) * num_neurons + 1
+    end_col <- i * num_neurons
+    # Extract the data for neurons in the current trial
+    noise_trial_data_list[[i]] <- spikes_noise_df[, start_col:end_col]
+    # Rename the columns to Neuron1 to Neuron74
+    colnames(noise_trial_data_list[[i]]) <- paste0("Neuron", 1:num_neurons)
+}
+
+
+```
+
+```{r}
+# Define the duration of each recording in seconds
+recording_duration <- 30  # 30 seconds
+
+# Function to calculate firing rate
+calculate_firing_rate <- function(spike_times) {
+  num_spikes <- length(spike_times)
+  firing_rate <- num_spikes / recording_duration
+  return(firing_rate)
+}
+
+# Calculate firing rates for each neuron in each trial
+firing_rates_trials_noise <- lapply(noise_trial_data_list, function(trial_data) {
+  apply(trial_data, 2, function(neuron_data) {
+    calculate_firing_rate(neuron_data[!is.na(neuron_data)])
+  })
+})
+
+```
+
+```{r}
+firing_rate_threshold <- 1.0  # 1.0 spikes/sec
+
+# Function to determine if a neuron meets the firing rate threshold on average
+meets_threshold <- function(neuron_firing_rates) {
+  mean_firing_rate <- mean(neuron_firing_rates, na.rm = TRUE)
+  return(mean_firing_rate >= firing_rate_threshold)
+}
+
+# Filter neurons based on the average firing rate threshold
+good_neurons <- sapply(firing_rates_trials_noise, function(trial_firing_rates) {
+  sapply(trial_firing_rates, meets_threshold)
+})
+
+good_neurons_all_trials_noise <- apply(good_neurons, 1, all)
+
+# Filter the original gratings_trial_data_list to only include 'good' neurons
+good_neurons_noise_data <- lapply(noise_trial_data_list, function(trial_data) {
+  trial_data[, good_neurons_all_trials_noise]
+})
+
+```
+
+## Raster Plots
+
+```{r}
+# Function to create a raster plot for a given neuron
+create_raster_plot <- function(neuron_number, trials_data_list, num_trials) {
+  # Initialize a list to hold all spike times for the neuron
+  neuron_spike_times_all_trials <- vector("list", num_trials)
+  
+  # Loop through each trial and collect the spike times for the neuron
+  for(i in 1:num_trials) {
+    neuron_spike_times_all_trials[[i]] <- trials_data_list[[i]][[paste0("Neuron", neuron_number)]]
+  }
+  
+  # Plot with one row per trial
+  plot(NULL, xlim = c(0, 30), ylim = c(0, num_trials),
+       xlab = "Time (seconds)", ylab = "Trial", main = paste("Raster Plot for Neuron", neuron_number))
+  
+  # Add horizontal lines for better visualization
+  abline(h = 1:num_trials, col = "lightgrey", lty = "dotted")
+  
+  # Plot the spikes for each trial
+  for(i in 1:num_trials) {
+    spike_times <- neuron_spike_times_all_trials[[i]]
+    if (length(spike_times) > 0) {
+      # Add points for each spike time, offset slightly by the trial number
+      points(spike_times, rep(i, length(spike_times)), pch = 20)
+    }
+  }
+}
+
+# Install and load the plotrix package 
+if (!require(plotrix)) install.packages("plotrix")
+library(plotrix)
+
+# Specify the neuron numbers you want to plot
+neurons_to_plot <- c(3, 46, 70, 28, 24)
+
+# Number of trials
+num_trials <- length(noise_trial_data_list)
+
+# Create raster plots for each specified neuron
+
+for (neuron_number in neurons_to_plot) {
+  create_raster_plot(neuron_number, noise_trial_data_list, num_trials)
+}
+
+```
+## Firing Rates
+
+
+```{r}
+# Filter firing rates to keep only those >= 1 for each trial
+filtered_firing_rates_trials_natural <- lapply(firing_rates_trials_natural, function(trial_data) {
+  # Apply the filter to keep only neurons with firing rate >= 1
+  trial_data[trial_data >= 1]
+})
+filtered_firing_rates_trials_noise <- lapply(firing_rates_trials_noise, function(trial_data) {
+  # Apply the filter to keep only neurons with firing rate >= 1
+  trial_data[trial_data >= 1]
+})
+filtered_firing_rates_trials_gratings <- lapply(firing_rates_trials, function(trial_data) {
+  # Apply the filter to keep only neurons with firing rate >= 1
+  trial_data[trial_data >= 1]
+})
+```
+
+```{r}
+# Function to calculate average firing rate across trials
+average_firing_rate_across_trials <- function(filtered_firing_rates) {
+  # Convert list of trials into a data frame
+  df <- do.call(rbind, filtered_firing_rates)
+  # Calculate average firing rate for each neuron
+  avg_rates <- colMeans(df, na.rm = TRUE)
+  return(avg_rates)
+}
+
+# Calculate average firing rates across trials for each condition
+avg_firing_rates_natural <- average_firing_rate_across_trials(filtered_firing_rates_trials_natural)
+avg_firing_rates_noise <- average_firing_rate_across_trials(filtered_firing_rates_trials_noise)
+avg_firing_rates_gratings <- average_firing_rate_across_trials(filtered_firing_rates_trials_gratings)
+
+print(avg_firing_rates_gratings)
+print(avg_firing_rates_natural)
+print(avg_firing_rates_noise)
+```
+```{r}
+# Function to find common neurons with firing rate >= 1 across all trials
+find_common_neurons <- function(firing_rate_list) {
+  # Identify neurons present in all trials
+  common_neurons <- Reduce(intersect, lapply(firing_rate_list, names))
+  return(common_neurons)
+}
+
+# Find common neurons for each condition
+common_neurons_natural <- find_common_neurons(filtered_firing_rates_trials_natural)
+common_neurons_noise <- find_common_neurons(filtered_firing_rates_trials_noise)
+common_neurons_gratings <- find_common_neurons(filtered_firing_rates_trials_gratings)
+
+```
+
+```{r}
+# Adjusted function to calculate average firing rates for common neurons
+average_firing_rate_common_neurons <- function(filtered_firing_rates, common_neurons) {
+  # Filter for common neurons and combine into a data frame
+  df <- do.call(rbind, lapply(filtered_firing_rates, function(x) x[common_neurons]))
+  # Calculate average firing rates
+  avg_rates <- colMeans(df, na.rm = TRUE)
+  return(avg_rates)
+}
+
+# Calculate average firing rates for common neurons
+avg_rates_natural <- average_firing_rate_common_neurons(filtered_firing_rates_trials_natural, common_neurons_natural)
+avg_rates_noise <- average_firing_rate_common_neurons(filtered_firing_rates_trials_noise, common_neurons_noise)
+avg_rates_gratings <- average_firing_rate_common_neurons(filtered_firing_rates_trials_gratings, common_neurons_gratings)
+
+```
+
+```{r}
+print(avg_rates_gratings)
+print(avg_rates_natural)
+print(avg_rates_noise)
+```
+
+
+```{r}
+calculate_firing_rate <- function(spikes, start_time, interval_duration) {
+  spikes_in_interval <- spikes[spikes >= start_time & spikes < (start_time + interval_duration)]
+  num_spikes <- sum(!is.na(spikes_in_interval))
+  firing_rate <- num_spikes / interval_duration
+  return(firing_rate)
+}
+
+```
+
+```{r}
+# Initialize a dataframe to store the results
+firing_rates_df <- data.frame()
+
+for (neuron in names(spikes_df)) {
+  neuron_data <- spikes_df[[neuron]]
+  total_duration <- max(neuron_data, na.rm = TRUE)
+  interval_duration <- 30  # 30 seconds
+  num_intervals <- total_duration / interval_duration
+  
+  # Calculate firing rate for each interval
+  firing_rates <- numeric(num_intervals)
+  for (i in 1:num_intervals) {
+    start_time <- (i - 1) * interval_duration
+    firing_rates[i] <- calculate_firing_rate(neuron_data, start_time, interval_duration)
+  }
+  
+  # Calculate the average firing rate for the neuron
+  avg_firing_rate <- mean(firing_rates, na.rm = TRUE)
+  firing_rates_df <- rbind(firing_rates_df, data.frame(Neuron = neuron, AvgFiringRate = avg_firing_rate))
+}
+
+
+# Filter out neurons with an average firing rate greater than 9
+filtered_firing_rates_df <- firing_rates_df[firing_rates_df$AvgFiringRate <= 9, ]
+
+# View the filtered dataframe
+print(filtered_firing_rates_df)
+# Transpose the dataframe
+transposed_firing_rates <- t(filtered_firing_rates_df)
+
+# Set the column names as the neuron identifiers
+colnames(transposed_firing_rates) <- transposed_firing_rates[1,]
+
+# Remove the first row (which now contains redundant neuron identifiers)
+transposed_firing_rates <- transposed_firing_rates[-1,]
+
+# Print the formatted firing rates
+print(transposed_firing_rates)
+
+```
+
+
+
+
+```{r}
+# Function to create a dataframe from the avg_rates vector
+create_firing_rate_df <- function(avg_rates, condition) {
+  neuron_ids <- names(avg_rates)
+  firing_rates <- unname(avg_rates)
+  data.frame(Neuron = neuron_ids, Condition = condition, FiringRate = firing_rates)
+}
+
+# Create dataframes for each condition
+df_gratings <- create_firing_rate_df(avg_rates_gratings, "Gratings")
+df_natural <- create_firing_rate_df(avg_rates_natural, "Natural")
+df_noise <- create_firing_rate_df(avg_rates_noise, "Noise")
+df_spontaneous <- create_firing_rate_df(transposed_firing_rates, "Baseline")
+
+```
+
+## SEGMENTING METHODS TO CHECK HOW IT COMPARES ACROSS JUST PUT IN variable names to check already 1 ms bins, Ibrahim just go through abnd check in the following block for eah method, it got too slow when I did them all so do one at a time if speed is an issue 
+
+```{r}
+set.seed(123)  # For reproducibility
+total_duration <- 1800  # Total duration in seconds
+interval_duration <- 30  # Interval duration in seconds
+
+random_intervals <- function(neuron_data) {
+  # Generate a random start time
+  start_time <- sample(0:(total_duration - interval_duration), 1)
+  end_time <- start_time + interval_duration
+  
+  # Select spikes within this random interval
+  neuron_data[neuron_data >= start_time & neuron_data < end_time]
+}
+
+random_sampled_data <- lapply(spikes_df, random_intervals)
+
+sequential_segments <- function(neuron_data) {
+  segments <- split(neuron_data, ceiling(neuron_data / interval_duration))
+  segments
+}
+
+sequential_segmented_data <- lapply(spikes_df, sequential_segments)
+
+overlap_interval <- 15  # Overlap duration in seconds
+overlapping_segments <- function(neuron_data) {
+  # Calculate number of segments considering overlap
+  num_segments <- ceiling((total_duration - interval_duration) / (interval_duration - overlap_interval))
+  segments <- list()
+  
+  for (i in 1:num_segments) {
+    start_time <- (i - 1) * (interval_duration - overlap_interval)
+    end_time <- start_time + interval_duration
+    segments[[i]] <- neuron_data[neuron_data >= start_time & neuron_data < end_time]
+  }
+
+  segments
+}
+
+overlapping_segmented_data <- lapply(spikes_df, overlapping_segments)
+
+num_intervals <- 10  # Number of intervals to create
+fixed_point_intervals <- function(neuron_data) {
+  # Randomly select start points
+  start_points <- sample(0:(total_duration - interval_duration), num_intervals)
+  
+  segments <- list()
+  for (start_time in start_points) {
+    end_time <- start_time + interval_duration
+    segments[[paste0(start_time, "-", end_time)]] <- neuron_data[neuron_data >= start_time & neuron_data < end_time]
+  }
+
+  segments
+}
+
+fixed_point_segmented_data <- lapply(spikes_df, fixed_point_intervals)
+
+```
+
+
+```{r}
+# Combine the data into one dataframe, and i used all the different methods to check for synchrony among results 
+firing_rate_data <- rbind(df_spontaneous, df_gratings, df_natural, df_noise)
+```
+
+```{r}
+# Perform ANOVA
+# Create dataframes for comparison
+df_gratings_vs_spontaneous <- rbind(df_spontaneous, df_gratings)
+df_natural_vs_spontaneous <- rbind(df_spontaneous, df_natural)
+df_noise_vs_spontaneous <- rbind(df_spontaneous, df_noise)
+
+
+```
+
+```{r}
+# ANOVA for Gratings vs Spontaneous
+anova_gratings <- aov(FiringRate ~ Condition, data = df_gratings_vs_spontaneous)
+summary(anova_gratings)
+
+# ANOVA for Natural vs Spontaneous
+anova_natural <- aov(FiringRate ~ Condition, data = df_natural_vs_spontaneous)
+summary(anova_natural)
+
+# ANOVA for Noise vs Spontaneous
+anova_noise <- aov(FiringRate ~ Condition, data = df_noise_vs_spontaneous)
+summary(anova_noise)
+
+```
+
+```{r}
+# Assuming df_spontaneous, df_gratings, df_natural, and df_noise are already created
+combined_df <- rbind(df_spontaneous, df_gratings, df_natural, df_noise)
+# Perform ANOVA on the combined dataset
+anova_combined <- aov(FiringRate ~ Condition, data = combined_df)
+
+# Tukey's HSD test
+tukey_result <- TukeyHSD(anova_combined)
+print(tukey_result)
+
+```
+
+```{r}
+library(ggplot2)
+install.packages('ggbeeswarm')
+library(ggbeeswarm)
+
+ggplot(combined_df, aes(x=Condition, y=FiringRate, fill=Condition)) +
+  geom_boxplot(outlier.shape = NA) +  # Hide outliers in boxplot
+  geom_beeswarm(aes(color=Condition), size=1.5, alpha=0.7) +  # Add beeswarm points
+  geom_hline(yintercept = median(combined_df$FiringRate), linetype="dashed", color = "gray") +  # Add median line for overall median
+  scale_fill_brewer(palette="Set1") +
+  labs(x="Condition", y="Firing Rate") +
+  theme_minimal() +
+  theme(legend.position="none", plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Comparison of Neuron Firing Rates by Condition")
+
+
+
+```
+
+```{r}
+# Ensure FiringRate is numeric and Condition is a factor
+combined_df$FiringRate <- as.numeric(combined_df$FiringRate)
+combined_df$Condition <- as.factor(combined_df$Condition)
+
+# Perform the Dunn test
+dunn.test.result <- dunn.test(combined_df$FiringRate, combined_df$Condition, method = "bonferroni")
+
+# View the result
+print(dunn.test.result)
+
+
+```
+
+```{r}
+# Assume spikes_df is your data frame where each column is a neuron and each cell contains spike times
+set.seed(123)  # For reproducibility
+total_duration <- 1800  # Total duration in seconds
+interval_duration <- 30  # Interval duration in seconds
+
+# Function to calculate firing rate
+calculate_firing_rate <- function(spikes) {
+  length(spikes) / interval_duration  # Firing rate as spikes per second
+}
+
+# Function definitions for segmenting methods
+random_intervals <- function(neuron_data) {
+  start_time <- sample(0:(total_duration - interval_duration), 1)
+  end_time <- start_time + interval_duration
+  neuron_data[neuron_data >= start_time & neuron_data < end_time]
+}
+
+sequential_segments <- function(neuron_data) {
+  split(neuron_data, ceiling(neuron_data / interval_duration))
+}
+
+overlap_interval <- 15  # Overlap duration in seconds
+overlapping_segments <- function(neuron_data) {
+  num_segments <- ceiling((total_duration - interval_duration) / (interval_duration - overlap_interval))
+  segments <- list()
+  for (i in 1:num_segments) {
+    start_time <- (i - 1) * (interval_duration - overlap_interval)
+    end_time <- start_time + interval_duration
+    segments[[i]] <- neuron_data[neuron_data >= start_time & neuron_data < end_time]
+  }
+  segments
+}
+
+fixed_point_intervals <- function(neuron_data) {
+  num_intervals <- 10  # Number of intervals to create
+  start_points <- sample(0:(total_duration - interval_duration), num_intervals)
+  segments <- list()
+  for (start_time in start_points) {
+    end_time <- start_time + interval_duration
+    segments[[paste0(start_time, "-", end_time)]] <- neuron_data[neuron_data >= start_time & neuron_data < end_time]
+  }
+  segments
+}
+
+# Apply the segmenting functions to the data
+random_sampled_data <- lapply(spikes_df, random_intervals)
+sequential_segmented_data <- lapply(spikes_df, sequential_segments)
+overlapping_segmented_data <- lapply(spikes_df, overlapping_segments)
+fixed_point_segmented_data <- lapply(spikes_df, fixed_point_intervals)
+
+# Calculate firing rates for each segmenting method
+calculate_segmented_rates <- function(segmented_data) {
+  lapply(segmented_data, function(neuron_segments) {
+    sapply(neuron_segments, calculate_firing_rate)
+  })
+}
+
+rates_random <- calculate_segmented_rates(random_sampled_data)
+rates_sequential <- calculate_segmented_rates(sequential_segmented_data)
+rates_overlapping <- calculate_segmented_rates(overlapping_segmented_data)
+rates_fixed_point <- calculate_segmented_rates(fixed_point_segmented_data)
+
+# Visualization: Boxplots for each neuron
+par(mfrow=c(2,2))  # Arrange plots in 2x2 grid
+
+boxplot(unlist(rates_random), main = "Random Sampling", ylab = "Firing Rate (spikes/sec)")
+boxplot(unlist(rates_sequential), main = "Sequential Segmenting", ylab = "Firing Rate (spikes/sec)")
+boxplot(unlist(rates_overlapping), main = "Overlapping Segmenting", ylab = "Firing Rate (spikes/sec)")
+boxplot(unlist(rates_fixed_point), main = "Fixed-Point Segmenting", ylab = "Firing Rate (spikes/sec)")
+
+```
+
+
+## cv analysis
+
+```{r}
+# Function to calculate firing rate for a given interval
+calculate_firing_rate <- function(spikes, start_time, end_time) {
+  interval_spikes <- length(spikes[spikes >= start_time & spikes < end_time])
+  firing_rate <- interval_spikes / (end_time - start_time)
+  return(firing_rate)
+}
+
+# Initialize a list to store interval firing rates for each neuron
+interval_firing_rates <- list()
+
+for (neuron in names(spikes_df)) {
+  neuron_data <- spikes_df[[neuron]]
+  total_duration <- max(neuron_data, na.rm = TRUE)
+  interval_duration <- 30  # 30 seconds
+  num_intervals <- floor(total_duration / interval_duration)
+  
+  # Calculate firing rate for each interval
+  neuron_interval_rates <- numeric(num_intervals)
+  for (i in 1:num_intervals) {
+    start_time <- (i - 1) * interval_duration
+    end_time <- start_time + interval_duration
+    neuron_interval_rates[i] <- calculate_firing_rate(neuron_data, start_time, end_time)
+  }
+  
+  # Store the interval firing rates in the list
+  interval_firing_rates[[neuron]] <- neuron_interval_rates
+}
+
+# Calculate CV for each neuron
+neuron_CVs <- sapply(interval_firing_rates, function(firing_rates) {
+  cv <- sd(firing_rates, na.rm = TRUE) / mean(firing_rates, na.rm = TRUE)
+  return(cv)
+})
+
+# Create a dataframe with the CV results
+cv_df <- data.frame(Neuron = names(neuron_CVs), CV = neuron_CVs)
+
+```
+
+```{r}
+# Example for one neuron
+neuron_data <- spikes_df[['Neuron3']] # Assuming 'Neuron1' exists
+neuron_data <- neuron_data[!is.na(neuron_data)] # Remove NAs
+total_duration <- max(neuron_data) # Ensure this is in seconds
+interval_duration <- 30 # seconds
+
+# Calculate firing rates for each interval and print them
+num_intervals <- ceiling(total_duration / interval_duration)
+firing_rates <- numeric(num_intervals)
+for (i in 1:num_intervals) {
+    interval_start <- (i - 1) * interval_duration
+    interval_end <- i * interval_duration
+    spikes_in_interval <- length(which(neuron_data >= interval_start & neuron_data < interval_end))
+    firing_rates[i] <- spikes_in_interval / interval_duration
+    cat(sprintf("Interval %d: %f spikes/sec\n", i, firing_rates[i]))
+}
+
+# Average firing rate
+cat("Average Firing Rate:", mean(firing_rates), "spikes/sec\n")
+
+```
+
+```{r}
+# Initialize a dataframe to store the CV results
+cv_df <- data.frame(Neuron = character(), CV = numeric())
+
+for (neuron in names(spikes_df)) {
+    neuron_data <- spikes_df[[neuron]]
+    neuron_data <- neuron_data[!is.na(neuron_data)]
+    total_duration <- max(neuron_data, na.rm = TRUE)
+    interval_duration <- 30  # 30 seconds
+    num_intervals <- ceiling(total_duration / interval_duration)
+
+    # Calculate firing rates for each interval
+    firing_rates <- numeric(num_intervals)
+    for (i in 1:num_intervals) {
+        interval_start <- (i - 1) * interval_duration
+        interval_end <- i * interval_duration
+        spikes_in_interval <- length(which(neuron_data >= interval_start & neuron_data < interval_end))
+        firing_rates[i] <- spikes_in_interval / interval_duration
+    }
+
+    # Calculate the CV for the neuron
+    neuron_cv <- sd(firing_rates, na.rm = TRUE) / mean(firing_rates, na.rm = TRUE)
+    cv_df <- rbind(cv_df, data.frame(Neuron = neuron, CV = neuron_cv))
+}
+
+# View the results
+print(cv_df)
+
+```
+
+```{r}
+# Initialize a dataframe to store the CV results for gratings
+cv_gratings_df <- data.frame(Neuron = character(), CV = numeric())
+
+# Get the list of all neuron names from the first trial assuming that all trials have the same neurons
+neuron_names <- names(filtered_firing_rates_trials_gratings[[1]])
+
+# Calculate CV for each neuron
+for (neuron_name in neuron_names) {
+  # Extract firing rates for this neuron across all trials
+  neuron_firing_rates <- sapply(filtered_firing_rates_trials_gratings, function(trial) trial[neuron_name], simplify = "array")
+  
+  # Calculate the CV for the neuron
+  neuron_cv <- sd(neuron_firing_rates, na.rm = TRUE) / mean(neuron_firing_rates, na.rm = TRUE) 
+  
+  # Append to the dataframe
+  cv_gratings_df <- rbind(cv_gratings_df, data.frame(Neuron = neuron_name, CV = neuron_cv))
+  cv_gratings_df = subset(cv_gratings_df, cv_gratings_df$CV > 0.1 & cv_gratings_df$CV < 0.3)
+
+}
+
+# View the results
+print(cv_gratings_df)
+
+
+
+```
+
+```{r}
+# Initialize a dataframe to store the CV results for gratings
+cv_natural_df <- data.frame(Neuron = character(), CV = numeric())
+
+# Get the list of all neuron names from the first trial assuming that all trials have the same neurons
+neuron_names <- names(filtered_firing_rates_trials_natural[[1]])
+
+# Calculate CV for each neuron
+for (neuron_name in neuron_names) {
+  # Extract firing rates for this neuron across all trials
+  neuron_firing_rates <- sapply(filtered_firing_rates_trials_natural, function(trial) trial[neuron_name], simplify = "array")
+  
+  # Calculate the CV for the neuron
+  neuron_cv <- sd(neuron_firing_rates, na.rm = TRUE) / mean(neuron_firing_rates, na.rm = TRUE) 
+  
+  # Append to the dataframe
+  cv_natural_df <- rbind(cv_natural_df, data.frame(Neuron = neuron_name, CV = neuron_cv))
+}
+
+# View the results
+print(cv_natural_df)
+```
+
+```{r}
+# Initialize a dataframe to store the CV results for gratings
+cv_noise_df <- data.frame(Neuron = character(), CV = numeric())
+
+# Get the list of all neuron names from the first trial assuming that all trials have the same neurons
+neuron_names <- names(filtered_firing_rates_trials_noise[[1]])
+
+# Calculate CV for each neuron
+for (neuron_name in neuron_names) {
+  # Extract firing rates for this neuron across all trials
+  neuron_firing_rates <- sapply(filtered_firing_rates_trials_noise, function(trial) trial[neuron_name], simplify = "array")
+  
+  # Calculate the CV for the neuron
+  neuron_cv <- sd(neuron_firing_rates, na.rm = TRUE) / mean(neuron_firing_rates, na.rm = TRUE) 
+  
+  # Append to the dataframe
+  cv_noise_df <- rbind(cv_noise_df, data.frame(Neuron = neuron_name, CV = neuron_cv))
+}
+
+# View the results
+print(cv_noise_df)
+```
+
+```{r}
+# Combine all CV data frames into one for plotting, and also add and compare with multiple timepoints, neuron to neuron to check using previous data just plug in and fill in Ibrahim and you can see all possible reaults, I think it give us a pretty good picture, and well select one for presentation and paper, again why I think we have so much to look at more on this next smester 
+cv_combined_df <- rbind(cv_gratings_df %>% mutate(Condition = 'Gratings'),
+  cv_natural_df %>% mutate(Condition = 'Natural'),
+  cv_noise_df %>% mutate(Condition = 'Noise')
+)
+
+
+ggplot(cv_combined_df, aes(x = Condition, y = CV, color = Condition)) + 
+  geom_quasirandom(alpha = 0.6, size = 2) +
+  theme_minimal() +
+  labs(title = "Bee Swarm Plot of CVs for Different Conditions",
+       x = "Condition",
+       y = "Coefficient of Variation (CV)") +
+  scale_color_brewer(palette = "Dark2") +
+  theme(legend.position = "none")
+
+
+
+
+
+```
+
+```{r}
+cv_combined_df <- rbind(cv_gratings_df %>% mutate(Condition = 'Gratings'),
+  cv_natural_df %>% mutate(Condition = 'Natural'),
+  cv_df %>% mutate(Condition = 'Spontaneus'),
+  cv_noise_df %>% mutate(Condition = 'Noise')
+)
+
+
+kruskal.test(CV ~ Condition, data = cv_combined_df)
+library(dunn.test)
+dunn.test(cv_combined_df$CV, cv_combined_df$Condition, method="bonferroni")
+```
+```{r}
+aggregate(CV ~ Condition, data = cv_combined_df, FUN = function(x) c(Mean = mean(x), Median = median(x), SD = sd(x)))
+library(car)
+leveneTest(CV ~ Condition, data = cv_combined_df)
+wilcox.test(CV ~ Condition, data = cv_combined_df, subset = Condition %in% c("Gratings", "Natural"))
+```
+
+Spontaneous Activity:
+The Spontaneous condition's mean CV is greater than that of the Natural condition but less than the Noise condition. This sets a baseline for the variability in neural firing without any external stimuli. The fact that both structured conditions (Natural and Gratings) have a lower mean CV than the Spontaneous condition suggests that structured stimuli, in general, lead to more orderly neural responses.
+Implications for Neural Processing:
+The plot supports the idea that the brain's response to structured stimuli is more organized and predictable than its response to unstructured stimuli. This could be due to the structured stimuli containing features and patterns that are more commonly encountered in natural environments, to which the sensory systems of the brain are adapted.
+The increased variability in response to unstructured stimuli could be indicative of the brain's attempt to find a pattern or to handle the unpredictability inherent in the noise.
+
+
+## Bursts
+```{r}
+# Set total duration of the recording in seconds and the bin size
+total_duration <- 180 # 3 minutes of recording
+bin_size <- 30 # Bin size of 30 seconds
+
+# Initialize a list to store the binned data
+binned_spikes_list <- list()
+
+# Function to bin the spikes into 30-second intervals
+bin_spikes <- function(spike_times, total_duration, bin_size) {
+  num_bins <- total_duration / bin_size
+  bins <- vector('list', num_bins)
+  for (i in 1:num_bins) {
+    # Define the start and end of the current bin
+    bin_start <- (i - 1) * bin_size
+    bin_end <- bin_start + bin_size
+    # Subset the spike times that fall into the current bin
+    bins[[i]] <- spike_times[spike_times >= bin_start & spike_times < bin_end]
+  }
+  return(bins)
+}
+
+# Apply the binning function to each neuron's spike times
+for(neuron in names(spikes_df)) {
+  # Assuming each neuron's data is already sorted and cleaned of artifacts
+  neuron_data <- spikes_df[[neuron]]
+  binned_spikes_list[[neuron]] <- bin_spikes(neuron_data, total_duration, bin_size)
+}
+
+```
+
+```{r}
+detect_bursts <- function(spikes, min_spikes = 3, max_interval = 10) {
+  # Remove any NA values from spikes
+  spikes <- na.omit(spikes)
+
+  # Ensure spikes are sorted in ascending order
+  spikes <- sort(spikes)
+
+  bursts <- list()
+  burst <- c()
+  last_spike <- NULL
+
+  for (spike in spikes) {
+    if (is.null(last_spike) || (spike - last_spike) <= max_interval) {
+      burst <- c(burst, spike)
+    } else {
+      if (length(burst) >= min_spikes) {
+        bursts <- c(bursts, list(burst))
+      }
+      burst <- c(spike)
+    }
+    last_spike <- spike
+  }
+
+  if (length(burst) >= min_spikes) {
+    bursts <- c(bursts, list(burst))
+  }
+
+  return(bursts)
+}
+
+# Assuming 'binned_spikes_list' is your list of binned spike data from earlier
+burst_results_spontaneus <- lapply(binned_spikes_list, function(neuron_bins) {
+  lapply(neuron_bins, function(bin) detect_bursts(bin))
+})
+
+```
+
+```{r}
+analyze_bursts <- function(bursts) {
+  burst_lengths <- sapply(bursts, function(burst) {
+    if (length(burst) > 1) {
+      return(max(burst) - min(burst))
+    } else {
+      return(0)
+    }
+  })
+  avg_burst_length <- mean(burst_lengths)
+  num_spikes_per_burst <- sapply(bursts, length)
+  avg_spikes_per_burst <- mean(num_spikes_per_burst)
+  return(list(
+    avg_burst_length = avg_burst_length,
+    avg_spikes_per_burst = avg_spikes_per_burst
+  ))
+}
+
+burst_analysis_results_spontaneus <- lapply(burst_results_spontaneus, function(neuron) {
+  lapply(neuron, analyze_bursts)
+})
+
+```
+
+
+```{r}
+
+# Apply the burst detection to each trial for each neuron
+burst_results <- lapply(good_neurons_natural_data, function(trial_data) {
+  # trial_data is a dataframe with neurons as columns
+  apply(trial_data, 2, function(neuron_spikes) {
+    detect_bursts(neuron_spikes, min_spikes = 3, max_interval = 10)
+  })
+})
+
+# Function to summarize burst characteristics
+summarize_bursts <- function(bursts) {
+  # Assuming bursts is a list of bursts where each burst is a vector of spike times
+  burst_durations <- sapply(bursts, function(burst) max(burst) - min(burst))
+  burst_frequencies <- length(bursts) # Number of bursts
+  spikes_per_burst <- sapply(bursts, length)
+  
+  list(
+    average_duration = mean(burst_durations),
+    frequency = burst_frequencies,
+    average_spikes_per_burst = mean(spikes_per_burst)
+  )
+}
+
+# Summarize burst characteristics for each neuron across all trials
+burst_summary_natural <- lapply(burst_results, function(neuron_bursts) {
+  # neuron_bursts is a list of burst lists for each trial for a single neuron
+  lapply(neuron_bursts, summarize_bursts)
+})
+
+
+
+```
+
+```{r}
+
+# Apply the burst detection to each trial for each neuron
+burst_results_noise <- lapply(good_neurons_noise_data, function(trial_data) {
+  # trial_data is a dataframe with neurons as columns
+  apply(trial_data, 2, function(neuron_spikes) {
+    detect_bursts(neuron_spikes, min_spikes = 3, max_interval = 10)
+  })
+})
+
+# Function to summarize burst characteristics
+summarize_bursts <- function(bursts) {
+  # Assuming bursts is a list of bursts where each burst is a vector of spike times
+  burst_durations <- sapply(bursts, function(burst) max(burst) - min(burst))
+  burst_frequencies <- length(bursts) # Number of bursts
+  spikes_per_burst <- sapply(bursts, length)
+  
+  list(
+    average_duration = mean(burst_durations),
+    frequency = burst_frequencies,
+    average_spikes_per_burst = mean(spikes_per_burst)
+  )
+}
+
+# Summarize burst characteristics for each neuron across all trials
+burst_summary_noise <- lapply(burst_results_noise, function(neuron_bursts) {
+  # neuron_bursts is a list of burst lists for each trial for a single neuron
+  lapply(neuron_bursts, summarize_bursts)
+})
+
+
+```
+
+```{r}
+# Apply the burst detection to each trial for each neuron
+burst_results_gratings <- lapply(good_neurons_gratings_data, function(trial_data) {
+  # trial_data is a dataframe with neurons as columns
+  apply(trial_data, 2, function(neuron_spikes) {
+    detect_bursts(neuron_spikes, min_spikes = 3, max_interval = 10)
+  })
+})
+
+# Function to summarize burst characteristics
+summarize_bursts <- function(bursts) {
+  # Assuming bursts is a list of bursts where each burst is a vector of spike times
+  burst_durations <- sapply(bursts, function(burst) max(burst) - min(burst))
+  burst_frequencies <- length(bursts) # Number of bursts
+  spikes_per_burst <- sapply(bursts, length)
+  
+  list(
+    average_duration = mean(burst_durations),
+    frequency = burst_frequencies,
+    average_spikes_per_burst = mean(spikes_per_burst)
+  )
+}
+
+# Summarize burst characteristics for each neuron across all trials
+burst_summary_gratings <- lapply(burst_results_gratings, function(neuron_bursts) {
+  # neuron_bursts is a list of burst lists for each trial for a single neuron
+  lapply(neuron_bursts, summarize_bursts)
+})
+
+```
+
+
+
+```{r}
+dim(burst_analysis_results_spontaneus)
+dim(burst_summary_gratings)
+dim(burst_summary_noise)
+dim(burst_summary_natural)
+```
+```{r}
+# Create a new dataframe that includes condition labels
+combined_data_bursts <- data.frame(
+  avg_spikes_per_burst = c(
+    unlist(burst_analysis_results_spontaneus$avg_spikes_per_burst),
+    unlist(burst_summary_gratings$avg_spikes_per_burst),
+    unlist(burst_summary_natural$avg_spikes_per_burst),
+    unlist(burst_summary_noise$avg_spikes_per_burst)
+  ),
+  condition = factor(rep(c("Spontaneous", "Structured", "Structured", "Unstructured"), 
+                         c(length(burst_analysis_results_spontaneus$avg_spikes_per_burst),
+                           length(burst_summary_gratings$avg_spikes_per_burst),
+                           length(burst_summary_natural$avg_spikes_per_burst),
+                           length(burst_summary_noise$avg_spikes_per_burst))))
+)
+
+```
+
+```{r}
+
+
+# Initialize a vector to store the avg_spikes_per_burst for all neurons
+all_neurons_avg_spikes <- numeric()
+
+# Loop over each neuron's results and extract avg_spikes_per_burst
+for (neuron in names(burst_analysis_results_spontaneus)) {
+  neuron_data <- burst_analysis_results_spontaneus[[neuron]]
+  
+  # Extract avg_spikes_per_burst for each bin/trial and calculate the mean for the neuron
+  neuron_avg_spikes <- sapply(neuron_data, function(bin) bin$avg_spikes_per_burst)
+  
+  # Store the mean of avg_spikes_per_burst for this neuron
+  all_neurons_avg_spikes <- c(all_neurons_avg_spikes, mean(neuron_avg_spikes, na.rm = TRUE))
+}
+
+# all_neurons_avg_spikes now contains the average of avg_spikes_per_burst for all neurons
+print(all_neurons_avg_spikes)
+```
+
+```{r}
+# Initialize a list to store the avg_spikes_per_burst for all neurons across all trials
+all_neurons_avg_spikes_gratings <- list()
+
+# Loop over each trial
+for (trial_index in seq_along(burst_summary_gratings)) {
+  # Access the list of neurons for the current trial
+  trial_data <- burst_summary_gratings[[trial_index]]
+  
+  # Loop through each neuron in the trial
+  for (neuron_name in names(trial_data)) {
+    # Access the burst data for the current neuron
+    neuron_burst_data <- trial_data[[neuron_name]]
+    
+    # Extract the average_spikes_per_burst
+    if (!is.null(neuron_burst_data$average_spikes_per_burst)) {
+      # If the neuron already has data in the list, append the new value
+      if (neuron_name %in% names(all_neurons_avg_spikes_gratings)) {
+        all_neurons_avg_spikes_gratings[[neuron_name]] <- c(all_neurons_avg_spikes_gratings[[neuron_name]], neuron_burst_data$average_spikes_per_burst)
+      } else {
+        # If the neuron does not have data yet, create a new entry in the list
+        all_neurons_avg_spikes_gratings[[neuron_name]] <- neuron_burst_data$average_spikes_per_burst
+      }
+    }
+  }
+}
+
+# Now calculate the mean of avg_spikes_per_burst for each neuron across all trials
+neuron_bursts_gratings <- sapply(all_neurons_avg_spikes_gratings, mean, na.rm = TRUE)
+
+# Print the result to check
+print(neuron_bursts_gratings)
+
+```
+
+
+```{r}
+# Initialize a list to store the avg_spikes_per_burst for all neurons across all trials
+all_neurons_avg_spikes_noise <- list()
+
+# Loop over each trial
+for (trial_index in seq_along(burst_summary_noise)) {
+  # Access the list of neurons for the current trial
+  trial_data <- burst_summary_noise[[trial_index]]
+  
+  # Loop through each neuron in the trial
+  for (neuron_name in names(trial_data)) {
+    # Access the burst data for the current neuron
+    neuron_burst_data <- trial_data[[neuron_name]]
+    
+    # Extract the average_spikes_per_burst
+    if (!is.null(neuron_burst_data$average_spikes_per_burst)) {
+      # If the neuron already has data in the list, append the new value
+      if (neuron_name %in% names(all_neurons_avg_spikes_noise)) {
+        all_neurons_avg_spikes_noise[[neuron_name]] <- c(all_neurons_avg_spikes_noise[[neuron_name]], neuron_burst_data$average_spikes_per_burst)
+      } else {
+        # If the neuron does not have data yet, create a new entry in the list
+        all_neurons_avg_spikes_noise[[neuron_name]] <- neuron_burst_data$average_spikes_per_burst
+      }
+    }
+  }
+}
+
+# Now calculate the mean of avg_spikes_per_burst for each neuron across all trials
+neuron_bursts_noise <- sapply(all_neurons_avg_spikes_noise, mean, na.rm = TRUE)
+
+# Print the result to check
+print(neuron_bursts_noise)
+```
+```{r}
+# Initialize a list to store the avg_spikes_per_burst for all neurons across all trials
+all_neurons_avg_spikes_natural <- list()
+
+# Loop over each trial
+for (trial_index in seq_along(burst_summary_natural)) {
+  # Access the list of neurons for the current trial
+  trial_data <- burst_summary_natural[[trial_index]]
+  
+  # Loop through each neuron in the trial
+  for (neuron_name in names(trial_data)) {
+    # Access the burst data for the current neuron
+    neuron_burst_data <- trial_data[[neuron_name]]
+    
+    # Extract the average_spikes_per_burst
+    if (!is.null(neuron_burst_data$average_spikes_per_burst)) {
+      # If the neuron already has data in the list, append the new value
+      if (neuron_name %in% names(all_neurons_avg_spikes_noise)) {
+        all_neurons_avg_spikes_natural[[neuron_name]] <- c(all_neurons_avg_spikes_natural[[neuron_name]], neuron_burst_data$average_spikes_per_burst)
+      } else {
+        # If the neuron does not have data yet, create a new entry in the list
+        all_neurons_avg_spikes_natural[[neuron_name]] <- neuron_burst_data$average_spikes_per_burst
+      }
+    }
+  }
+}
+
+# Now calculate the mean of avg_spikes_per_burst for each neuron across all trials, Ibrahim this was hell to figure our
+neuron_bursts_natural <- sapply(all_neurons_avg_spikes_natural, mean, na.rm = TRUE)
+
+# Print the result to check
+print(neuron_bursts_natural)
+```
+```{r}
+# Assuming 'neuron_bursts_natural', 'neuron_bursts_noise', 'neuron_bursts_gratings', 
+# and 'all_neurons_avg_spikes' contain the mean of avg_spikes_per_burst for each neuron
+
+# Combine the data into one data frame
+data_to_compare <- data.frame(
+  avg_spikes_per_burst = c(all_neurons_avg_spikes, 
+                           neuron_bursts_gratings, 
+                           neuron_bursts_noise, 
+                           neuron_bursts_natural),
+  condition = factor(rep(c("Spontaneous", "Gratings", "Noise", "Natural"), 
+                         c(length(all_neurons_avg_spikes), 
+                           length(neuron_bursts_gratings), 
+                           length(neuron_bursts_noise), 
+                           length(neuron_bursts_natural)))
+))
+
+```
+
+```{r}
+
+anova_gratings_vs_spontaneous <- aov(avg_spikes_per_burst ~ condition, data = data_to_compare, subset = condition %in% c('Spontaneous', 'Gratings'))
+anova_noise_vs_spontaneous <- aov(avg_spikes_per_burst ~ condition, data = data_to_compare, subset = condition %in% c('Spontaneous', 'Noise'))
+anova_natural_vs_spontaneous <- aov(avg_spikes_per_burst ~ condition, data = data_to_compare, subset = condition %in% c('Spontaneous', 'Natural'))
+
+# Print the summaries to see the results
+print(summary(anova_gratings_vs_spontaneous))
+print(summary(anova_noise_vs_spontaneous))
+print(summary(anova_natural_vs_spontaneous))
+
+```
+```{r}
+# Get neuron names that are common in all conditions
+common_neurons <- Reduce(intersect, list(
+  names(all_neurons_avg_spikes),
+  names(burst_summary_gratings),
+  names(burst_summary_noise),
+  names(burst_summary_natural)
+))
+
+```
+
+```{r}
+# Assuming each dataframe has rows as neurons and columns as burst characteristics
+common_data <- lapply(common_neurons, function(neuron) {
+  data.frame(
+    Neuron = neuron,
+    Spontaneous = all_neurons_avg_spikes[neuron, "avg_spikes_per_burst"],
+    Gratings = burst_summary_gratings[neuron, "avg_spikes_per_burst"],
+    Noise = burst_summary_noise[neuron, "avg_spikes_per_burst"],
+    Natural = burst_summary_natural[neuron, "avg_spikes_per_burst"]
+  )
+})
+# Combine into a single dataframe
+common_data_df <- do.call(rbind, common_data)
+
+```
+
+```{r}
+mean_spontaneous <- mean(common_data_df$Spontaneous, na.rm = TRUE)
+mean_gratings <- mean(common_data_df$Gratings, na.rm = TRUE)
+mean_noise <- mean(common_data_df$Noise, na.rm = TRUE)
+mean_natural <- mean(common_data_df$Natural, na.rm = TRUE)
+
+```
+Vizualization didnt show anything good
+ ## OSTHS
+ 
+```{r}
+psths <- readMat("/Users/griffinthompson/Downloads/data_and_scripts/psths_movies/psths_monkey1_natural_movie.mat")
+print(psths)
+```
+```{r}
+library(R.matlab)
+library(ggplot2)
+library(reshape2)
+
+# Load PSTH data from a .mat file
+psths <- readMat("/Users/griffinthompson/Downloads/data_and_scripts/psths_movies/psths_monkey1_natural_movie.mat")
+
+# let's assume the PSTH data is in the first element of the list
+# and each column of the matrix/data frame represents a time point
+# We'll use the first element (psths[[1]]) as our PSTH data
+psth_data <- psths[[1]]
+
+psth_long <- melt(psth_data)
+
+# Now psth_long is a data frame with variables Var1 (trials/neurons), Var2 (time), and value (firing rate)
+colnames(psth_long) <- c("Trial", "Time", "FiringRate")
+
+# Plotting the PSTH using ggplot2
+psth_plot <- ggplot(psth_long, aes(x = Time, y = FiringRate)) +
+  geom_line(aes(group = Trial), alpha = 0.3) +  # Plot each trial/neuron with partial transparency
+  stat_summary(fun = mean, geom = "line", color = "blue", size = 1) +  # Add a line for the mean firing rate
+  labs(title = "Peristimulus Time Histogram Natural(PSTH)",
+       x = "Time (ms)", 
+       y = "Firing Rate (spikes/s)") +
+  theme_minimal()
+
+# Display the plot
+print(psth_plot)
+
+
+```
+ 
+```{r}
+library(R.matlab)
+library(ggplot2)
+library(reshape2)
+
+# Load PSTH data from a .mat file
+psths <- readMat("/Users/griffinthompson/Downloads/data_and_scripts/psths_movies/psths_monkey1_noise_movie.mat")
+
+
+psth_data <- psths[[1]]
+
+psth_long <- melt(psth_data)
+
+# Now psth_long is a data frame with variables Var1 (trials/neurons), Var2 (time), and value (firing rate)
+colnames(psth_long) <- c("Trial", "Time", "FiringRate")
+
+# Plotting the PSTH using ggplot2
+psth_plot <- ggplot(psth_long, aes(x = Time, y = FiringRate)) +
+  geom_line(aes(group = Trial), alpha = 0.3) +  # Plot each trial/neuron with partial transparency
+  stat_summary(fun = mean, geom = "line", color = "blue", size = 1) +  # Add a line for the mean firing rate
+  labs(title = "Peristimulus Time Noise Histogram (PSTH)",
+       x = "Time (ms)", 
+       y = "Firing Rate (spikes/s)") +
+  theme_minimal()
+
+# Display the plot
+print(psth_plot)
+
+
+
+```
+
+```{r}
+library(R.matlab)
+library(ggplot2)
+library(reshape2)
+
+# Load PSTH data from a .mat file
+psths <- readMat("/Users/griffinthompson/Downloads/data_and_scripts/psths_movies/psths_monkey1_gratings_movie.mat")
+
+
+psth_data <- psths[[1]]
+
+
+psth_long <- melt(psth_data)
+
+# Now psth_long is a data frame with variables Var1 (trials/neurons), Var2 (time), and value (firing rate)
+colnames(psth_long) <- c("Trial", "Time", "FiringRate")
+
+# Plotting the PSTH using ggplot2
+psth_plot <- ggplot(psth_long, aes(x = Time, y = FiringRate)) +
+  geom_line(aes(group = Trial), alpha = 0.3) +  # Plot each trial/neuron with partial transparency
+  stat_summary(fun = mean, geom = "line", color = "blue", size = 1) +  # Add a line for the mean firing rate
+  labs(title = "Peristimulus Time Histogram Gratings (PSTH)",
+       x = "Time (ms)", 
+       y = "Firing Rate (spikes/s)") +
+  theme_minimal()
+
+# Display the plot
+print(psth_plot)
+```
+
